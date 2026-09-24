@@ -4,10 +4,17 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import urllib.request
+from zoneinfo import ZoneInfo
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_PATH = ROOT / "state" / "reset-state.json"
+ROMANIA_TZ = ZoneInfo("Europe/Bucharest")
+ACCOUNT_LABEL = os.environ.get("ACCOUNT_LABEL", "David").strip() or "David"
+ACCOUNT_SLUG = os.environ.get("ACCOUNT_SLUG", ACCOUNT_LABEL.lower()).strip().lower() or "david"
+STATUS_WORKER_URL = os.environ.get("STATUS_WORKER_URL", "").rstrip("/")
+STATUS_INGEST_TOKEN = os.environ.get("STATUS_INGEST_TOKEN", "").strip()
 
 
 def utc_now():
@@ -78,34 +85,69 @@ def normalise_windows(snapshot):
 def fmt_local(epoch):
     if epoch is None:
         return "unknown"
-    tz = dt.timezone(dt.timedelta(hours=3))
-    stamp = dt.datetime.fromtimestamp(epoch, dt.timezone.utc).astimezone(tz)
-    return stamp.strftime("%d %b %Y, %H:%M EEST")
+    stamp = dt.datetime.fromtimestamp(epoch, dt.timezone.utc).astimezone(ROMANIA_TZ)
+    return stamp.strftime("%d %b %Y, %H:%M %Z")
 
 
-def discord_ping(window, previous_reset):
+def usage_block(window):
+    if not window:
+        return "Unavailable"
+    return f"{window['usedPercent']:.0f}% used\nNext reset: **{fmt_local(window.get('resetsAt'))}**"
+
+
+def discord_ping(trigger_window, windows):
     webhook = os.environ.get("DISCORD_WEBHOOK_URL")
     user_id = os.environ.get("DISCORD_USER_ID", "").strip()
     if not webhook:
         raise RuntimeError("DISCORD_WEBHOOK_URL is missing")
 
     mention = f"<@{user_id}> " if user_id else ""
+    five = windows.get("300")
+    weekly = windows.get("10080")
     content = (
-        f"{mention}**Codex {window['label']} usage reset** ✅\n"
-        f"Usage now: **{window['usedPercent']:.0f}%**\n"
-        f"Previous reset point: {fmt_local(previous_reset)}\n"
-        f"Next reset: {fmt_local(window['resetsAt'])}"
+        f"{mention}**Codex {trigger_window['label']} reset — {ACCOUNT_LABEL}**\n\n"
+        f"**5-hour:** {usage_block(five)}\n\n"
+        f"**Weekly:** {usage_block(weekly)}"
     )
     body = json.dumps({"content": content, "allowed_mentions": {"parse": ["users"]}}).encode()
     req = urllib.request.Request(
         webhook,
         data=body,
-        headers={"Content-Type": "application/json", "User-Agent": "codex-reset-monitor/1.0"},
+        headers={"Content-Type": "application/json", "User-Agent": "codex-reset-monitor/2.0"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=20) as res:
         if res.status not in (200, 204):
             raise RuntimeError(f"Discord returned HTTP {res.status}")
+
+
+def publish_status(windows, checked_at):
+    if not STATUS_WORKER_URL or not STATUS_INGEST_TOKEN:
+        return "disabled"
+
+    body = json.dumps(
+        {
+            "account": ACCOUNT_SLUG,
+            "label": ACCOUNT_LABEL,
+            "checkedAt": checked_at.isoformat().replace("+00:00", "Z"),
+            "windows": windows,
+        },
+        separators=(",", ":"),
+    ).encode()
+    req = urllib.request.Request(
+        f"{STATUS_WORKER_URL}/ingest",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {STATUS_INGEST_TOKEN}",
+            "Content-Type": "application/json",
+            "User-Agent": f"codex-reset-monitor/{ACCOUNT_SLUG}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as res:
+        if res.status not in (200, 204):
+            raise RuntimeError(f"Status Worker returned HTTP {res.status}")
+    return "published"
 
 
 def main():
@@ -133,7 +175,7 @@ def main():
             and current_reset is not None
             and current_reset > previous_reset
         ):
-            alerts.append((window, previous_reset))
+            alerts.append(window)
 
         new_state = {
             "label": window["label"],
@@ -144,7 +186,6 @@ def main():
             previous_windows[key] = new_state
             changed = True
 
-    # Keep a public scheduled workflow alive even during long periods with no quota changes.
     heartbeat = state.get("heartbeatAt")
     heartbeat_dt = None
     if heartbeat:
@@ -157,19 +198,32 @@ def main():
         changed = True
 
     state["lastCheckedAt"] = now.isoformat().replace("+00:00", "Z")
-    # lastCheckedAt is intentionally not used to decide whether to commit.
     if changed:
         save_json(STATE_PATH, state)
 
-    for window, previous_reset in alerts:
-        discord_ping(window, previous_reset)
+    for window in alerts:
+        discord_ping(window, windows)
 
-    print(json.dumps({
-        "firstRun": first_run,
-        "alertsSent": len(alerts),
-        "stateChanged": changed,
-        "windows": windows,
-    }, indent=2))
+    publish_result = "disabled"
+    try:
+        publish_result = publish_status(windows, now)
+    except Exception as exc:
+        publish_result = "failed"
+        print(f"WARNING: status publish failed: {exc}", file=sys.stderr)
+
+    print(
+        json.dumps(
+            {
+                "account": ACCOUNT_LABEL,
+                "firstRun": first_run,
+                "alertsSent": len(alerts),
+                "statusPublish": publish_result,
+                "stateChanged": changed,
+                "windows": windows,
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":
