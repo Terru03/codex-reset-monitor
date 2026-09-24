@@ -92,7 +92,8 @@ def fmt_local(epoch):
 def usage_block(window):
     if not window:
         return "Unavailable"
-    return f"{window['usedPercent']:.0f}% used\nNext reset: **{fmt_local(window.get('resetsAt'))}**"
+    remaining = max(0.0, min(100.0, 100.0 - float(window.get("usedPercent", 0))))
+    return f"{remaining:.0f}% remaining\nNext reset: **{fmt_local(window.get('resetsAt'))}**"
 
 
 def discord_ping(trigger_window, windows):
@@ -169,11 +170,16 @@ def main():
         previous = previous_windows.get(key, {})
         previous_reset = previous.get("resetsAt")
 
+        duration_mins = window.get("durationMins")
+        meaningful_advance = 300
+        if duration_mins:
+            meaningful_advance = max(300, int(float(duration_mins) * 60 * 0.25))
+
         if (
             not first_run
             and previous_reset is not None
             and current_reset is not None
-            and current_reset > previous_reset
+            and current_reset - previous_reset >= meaningful_advance
         ):
             alerts.append(window)
 
