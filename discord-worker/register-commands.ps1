@@ -31,6 +31,36 @@ if ([string]::IsNullOrWhiteSpace($BotToken)) {
     throw "Discord Bot Token cannot be empty."
 }
 
+$headers = @{
+    Authorization = "Bot $BotToken"
+    "User-Agent" = "DiscordBot (https://github.com/Terru03/codex-reset-monitor, 1.0)"
+    Accept = "application/json"
+}
+
+Write-Host "Checking Discord bot token..."
+try {
+    $me = Invoke-RestMethod -Method Get -Uri "https://discord.com/api/v10/users/@me" -Headers $headers
+}
+catch {
+    throw "Discord rejected the bot token/API request. $($_.Exception.Message)"
+}
+
+if ([string]$me.id -ne [string]$ApplicationId) {
+    throw "Bot token belongs to Discord application $($me.id), not ApplicationId $ApplicationId."
+}
+
+Write-Host "Bot token OK: $($me.username) ($($me.id))"
+
+Write-Host "Checking that the bot is installed in guild $GuildId..."
+try {
+    $guild = Invoke-RestMethod -Method Get -Uri "https://discord.com/api/v10/guilds/$GuildId" -Headers $headers
+}
+catch {
+    throw "The bot cannot access guild $GuildId. Install the app into that server with bot + applications.commands scopes, then retry. $($_.Exception.Message)"
+}
+
+Write-Host "Guild access OK: $($guild.name)"
+
 $commands = @(
     @{
         name = "usage-david"
@@ -44,14 +74,11 @@ $commands = @(
     }
 )
 
-$headers = @{
-    Authorization = "Bot $BotToken"
-    "Content-Type" = "application/json"
-}
-
+$headers["Content-Type"] = "application/json"
 $body = $commands | ConvertTo-Json -Depth 10
 $uri = "https://discord.com/api/v10/applications/$ApplicationId/guilds/$GuildId/commands"
 
+Write-Host "Registering guild slash commands..."
 try {
     $result = Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -Body $body
 }
