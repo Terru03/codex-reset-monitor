@@ -8,7 +8,10 @@ $ErrorActionPreference = "Stop"
 
 if (-not $ApplicationId) { $ApplicationId = Read-Host "Discord Application ID" }
 if (-not $GuildId) { $GuildId = Read-Host "Discord Server/Guild ID" }
-if (-not $BotToken) { $BotToken = Read-Host "Discord Bot Token" }
+if (-not $BotToken) {
+    $secureBotToken = Read-Host "Discord Bot Token (hidden)" -AsSecureString
+    $BotToken = [System.Net.NetworkCredential]::new("", $secureBotToken).Password
+}
 
 $commands = @(
     @{
