@@ -7,7 +7,18 @@ $ErrorActionPreference = "Stop"
 $sourceRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $nicuRepo = "Terru03/codex-reset-monitor-nicu"
 $nicuAuthHome = ".codex-reset-monitor-auth-nicu"
-$nicuTokenPath = Join-Path $env:LOCALAPPDATA "CodexResetMonitor\nicu-ingest-token.dpapi"
+
+function New-StrongToken {
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $bytes = New-Object byte[] 32
+        $rng.GetBytes($bytes)
+        return [Convert]::ToBase64String($bytes).TrimEnd("=").Replace("+","-").Replace("/","_")
+    }
+    finally {
+        $rng.Dispose()
+    }
+}
 
 Write-Host "Preparing Nicu monitor in $Destination"
 
@@ -110,12 +121,21 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to encrypt Nicu auth."
 }
 
-if (-not (Test-Path $nicuTokenPath)) {
-    throw "Nicu ingest token not found. Expected: $nicuTokenPath"
-}
+$nicuIngestToken = New-StrongToken
+$workerDir = Join-Path $sourceRoot "discord-worker"
 
-$secureNicuToken = Get-Content -LiteralPath $nicuTokenPath -Raw | ConvertTo-SecureString
-$nicuIngestToken = [System.Net.NetworkCredential]::new("", $secureNicuToken).Password
+Write-Host ""
+Write-Host "Rotating Nicu's private Worker ingest token..."
+Push-Location $workerDir
+try {
+    $nicuIngestToken | npx wrangler secret put INGEST_TOKEN_NICU
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install INGEST_TOKEN_NICU in Cloudflare Worker."
+    }
+}
+finally {
+    Pop-Location
+}
 
 $secureDiscordWebhook = Read-Host "Paste the SAME Discord webhook URL used by David (hidden)" -AsSecureString
 $discordWebhook = [System.Net.NetworkCredential]::new("", $secureDiscordWebhook).Password
