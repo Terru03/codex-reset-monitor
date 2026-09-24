@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $sourceRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $nicuRepo = "Terru03/codex-reset-monitor-nicu"
 $nicuAuthHome = ".codex-reset-monitor-auth-nicu"
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 function New-StrongToken {
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -45,16 +46,17 @@ $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $workflow = $workflow.Replace("ACCOUNT_LABEL: David", "ACCOUNT_LABEL: Nicu")
 $workflow = $workflow.Replace("ACCOUNT_SLUG: david", "ACCOUNT_SLUG: nicu")
 $workflow = $workflow.Replace("group: codex-reset-monitor", "group: codex-reset-monitor-nicu")
-Set-Content -LiteralPath $workflowPath -Value $workflow -Encoding UTF8
+[System.IO.File]::WriteAllText($workflowPath, $workflow, $utf8NoBom)
 
 $statePath = Join-Path $Destination "state\reset-state.json"
 if (-not $destinationHasGit) {
-@'
+$initialState = @'
 {
   "version": 1,
   "windows": {}
 }
-'@ | Set-Content -LiteralPath $statePath -Encoding UTF8
+'@
+[System.IO.File]::WriteAllText($statePath, $initialState + [Environment]::NewLine, $utf8NoBom)
 }
 
 $distros = (wsl.exe -l -q) -replace [char]0,"" | Where-Object { $_ -and $_ -notmatch "docker-desktop" }
