@@ -153,17 +153,20 @@ function formatUsage(status) {
 
   return (
     `**Codex usage — ${status.label}**\n\n` +
-    `**5-hour:** ${formatPercent(five?.usedPercent)} used\n` +
+    `**5-hour:** ${formatRemaining(five?.usedPercent)} remaining\n` +
     `Next reset: **${formatRomania(five?.resetsAt)}**\n\n` +
-    `**Weekly:** ${formatPercent(weekly?.usedPercent)} used\n` +
+    `**Weekly:** ${formatRemaining(weekly?.usedPercent)} remaining\n` +
     `Next reset: **${formatRomania(weekly?.resetsAt)}**\n\n` +
     `Last checked: ${formatRomania(Math.floor(checkedMs / 1000))}` +
     staleLine
   );
 }
 
-function formatPercent(value) {
-  return Number.isFinite(Number(value)) ? `${Math.round(Number(value))}%` : "unknown";
+function formatRemaining(usedValue) {
+  const used = Number(usedValue);
+  if (!Number.isFinite(used)) return "unknown";
+  const remaining = Math.max(0, Math.min(100, 100 - used));
+  return `${Math.round(remaining)}%`;
 }
 
 function formatRomania(epoch) {
