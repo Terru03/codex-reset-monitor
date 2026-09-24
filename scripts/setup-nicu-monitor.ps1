@@ -3,18 +3,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
 $sourceRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $nicuRepo = "Terru03/codex-reset-monitor-nicu"
 $nicuAuthHome = ".codex-reset-monitor-auth-nicu"
 $nicuTokenPath = Join-Path $env:LOCALAPPDATA "CodexResetMonitor\nicu-ingest-token.dpapi"
 
-if (Test-Path $Destination) {
-    throw "Destination already exists: $Destination"
+Write-Host "Preparing Nicu monitor in $Destination"
+
+if (-not (Test-Path $Destination)) {
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 }
 
-Write-Host "Creating Nicu monitor in $Destination"
-New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-
+# Refresh monitor files from the working David repo while keeping Nicu-specific repo/auth state separate.
 Get-ChildItem -LiteralPath $sourceRoot -Force |
     Where-Object { $_.Name -notin @(".git", "discord-worker") } |
     ForEach-Object {
@@ -29,41 +30,54 @@ $workflow = $workflow.Replace("group: codex-reset-monitor", "group: codex-reset-
 Set-Content -LiteralPath $workflowPath -Value $workflow -Encoding UTF8
 
 $statePath = Join-Path $Destination "state\reset-state.json"
+if (-not (Test-Path (Join-Path $Destination ".git"))) {
 @'
 {
   "version": 1,
   "windows": {}
 }
 '@ | Set-Content -LiteralPath $statePath -Encoding UTF8
-
-Remove-Item -LiteralPath (Join-Path $Destination "secrets\auth.json.enc") -Force -ErrorAction SilentlyContinue
+}
 
 $distros = (wsl.exe -l -q) -replace [char]0,"" | Where-Object { $_ -and $_ -notmatch "docker-desktop" }
 $codexDistro = $null
 foreach ($d in $distros) {
-    $check = wsl.exe -d $d -- sh -lc 'command -v bash >/dev/null 2>&1 && command -v codex >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 && echo OK'
+    $check = wsl.exe -d $d -- sh -lc 'command -v bash >/dev/null 2>&1 && command -v codex >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1 && echo OK'
     if ($check -match "OK") {
         $codexDistro = $d.Trim()
         break
     }
 }
 if (-not $codexDistro) {
-    throw "Could not find a WSL distro containing bash, codex, and openssl."
+    throw "Could not find a WSL distro containing bash, codex, openssl, and wslpath."
 }
 
-Write-Host ""
-Write-Host "Starting isolated Codex login for Nicu."
-Write-Host "Complete the device login with NICU'S OpenAI account."
-$loginCmd = 'mkdir -p "$HOME/' + $nicuAuthHome + '" && CODEX_HOME="$HOME/' + $nicuAuthHome + '" codex login --device-auth'
-wsl.exe -d $codexDistro -- bash -lc $loginCmd
-if ($LASTEXITCODE -ne 0) {
-    throw "Nicu Codex login failed."
+$authCheck = wsl.exe -d $codexDistro -- bash -lc ('test -f "$HOME/' + $nicuAuthHome + '/auth.json" && echo OK')
+if ($authCheck -match "OK") {
+    Write-Host ""
+    Write-Host "Existing isolated Nicu Codex login found. Reusing it."
+}
+else {
+    Write-Host ""
+    Write-Host "Starting isolated Codex login for Nicu."
+    Write-Host "Complete the device login with NICU'S OpenAI account."
+    $loginCmd = 'mkdir -p "$HOME/' + $nicuAuthHome + '" && CODEX_HOME="$HOME/' + $nicuAuthHome + '" codex login --device-auth'
+    wsl.exe -d $codexDistro -- bash -lc $loginCmd
+    if ($LASTEXITCODE -ne 0) {
+        throw "Nicu Codex login failed."
+    }
+
+    $authCheck = wsl.exe -d $codexDistro -- bash -lc ('test -f "$HOME/' + $nicuAuthHome + '/auth.json" && echo OK')
+    if ($authCheck -notmatch "OK") {
+        throw "Nicu isolated auth.json was not created."
+    }
 }
 
-$probeRoot = $Destination.Replace('','/')
-$drive = $probeRoot.Substring(0,1).ToLower()
-$rest = $probeRoot.Substring(2)
-$destWsl = "/mnt/$drive$rest"
+$destWsl = (wsl.exe -d $codexDistro -- wslpath -a "$Destination").Trim()
+if (-not $destWsl.StartsWith("/")) {
+    throw "Could not convert destination path to WSL path. Got: $destWsl"
+}
+
 $probeCmd = 'cd "' + $destWsl + '" && CODEX_HOME="$HOME/' + $nicuAuthHome + '" python3 ./scripts/local_probe.py'
 Write-Host ""
 Write-Host "Verifying Nicu Codex usage..."
@@ -102,27 +116,66 @@ if ($discordUserId -notmatch '^\d{17,20}$') {
 }
 
 Set-Location $Destination
-git init -b main
-git add .
-git commit -m "Initial Nicu Codex reset monitor"
 
-gh repo create codex-reset-monitor-nicu --public --source . --remote origin --push
+if (-not (Test-Path ".git")) {
+    git init -b main
+    if ($LASTEXITCODE -ne 0) { throw "git init failed." }
+}
+
+git add .
+if ($LASTEXITCODE -ne 0) { throw "git add failed." }
+
+$staged = git diff --cached --name-only
+if ($staged) {
+    git commit -m "Initial Nicu Codex reset monitor"
+    if ($LASTEXITCODE -ne 0) { throw "git commit failed." }
+}
+
+$repoExists = $false
+gh repo view $nicuRepo *> $null
+if ($LASTEXITCODE -eq 0) {
+    $repoExists = $true
+}
+
+if (-not $repoExists) {
+    gh repo create codex-reset-monitor-nicu --public --source . --remote origin --push
+    if ($LASTEXITCODE -ne 0) { throw "Failed to create/push Nicu GitHub repository." }
+}
+else {
+    Write-Host "Nicu GitHub repository already exists. Updating it."
+    $origin = git remote get-url origin 2>$null
+    if (-not $origin) {
+        git remote add origin "https://github.com/$nicuRepo.git"
+    }
+    git push -u origin main
+    if ($LASTEXITCODE -ne 0) { throw "Failed to push Nicu repository." }
+}
 
 gh secret set AUTH_FILE_KEY -R $nicuRepo --body $authFileKey
+if ($LASTEXITCODE -ne 0) { throw "Failed to set AUTH_FILE_KEY." }
+
 gh secret set DISCORD_WEBHOOK_URL -R $nicuRepo --body $discordWebhook
+if ($LASTEXITCODE -ne 0) { throw "Failed to set DISCORD_WEBHOOK_URL." }
+
 gh secret set DISCORD_USER_ID -R $nicuRepo --body $discordUserId
+if ($LASTEXITCODE -ne 0) { throw "Failed to set DISCORD_USER_ID." }
+
 gh secret set STATUS_INGEST_TOKEN -R $nicuRepo --body $nicuIngestToken
+if ($LASTEXITCODE -ne 0) { throw "Failed to set STATUS_INGEST_TOKEN." }
 
 Write-Host ""
 Write-Host "Triggering Nicu's first GitHub check..."
 gh workflow run monitor.yml -R $nicuRepo
+if ($LASTEXITCODE -ne 0) { throw "Failed to trigger Nicu workflow." }
+
 Start-Sleep -Seconds 5
 $runId = gh run list -R $nicuRepo --workflow monitor.yml --limit 1 --json databaseId --jq '.[0].databaseId'
 if ($runId) {
     gh run watch $runId -R $nicuRepo --exit-status
+    if ($LASTEXITCODE -ne 0) { throw "Nicu workflow failed." }
 }
 
 Write-Host ""
-Write-Host "Nicu monitor deployed."
+Write-Host "Nicu monitor deployed successfully."
 Write-Host "Repository: https://github.com/$nicuRepo"
 Write-Host "Isolated Codex home: ~/$nicuAuthHome"
