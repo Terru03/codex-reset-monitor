@@ -21,6 +21,10 @@ jobs:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
       AUTH_FILE_KEY: ${{ secrets.AUTH_FILE_KEY }}
+      ACCOUNT_LABEL: David
+      ACCOUNT_SLUG: david
+      STATUS_WORKER_URL: https://codex-reset-monitor.david-galdea.workers.dev
+      STATUS_INGEST_TOKEN: ${{ secrets.STATUS_INGEST_TOKEN }}
 
     steps:
       - name: Checkout
