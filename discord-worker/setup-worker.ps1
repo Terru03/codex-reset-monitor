@@ -23,42 +23,13 @@ function New-StrongToken {
 if (-not $DiscordPublicKey) {
     $DiscordPublicKey = Read-Host "Discord application Public Key"
 }
+
+if ($DiscordPublicKey -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "Discord Public Key must be the 64-character hexadecimal key from the Developer Portal."
+}
+
 $discordAllowedUserId = Read-Host "Your numeric Discord User ID"
-if ($discordAllowedUserId -notmatch '^\d{17,20}
-$nicuToken = New-StrongToken
-
-Write-Host "Installing Worker dependencies..."
-npm install
-
-Write-Host "Uploading Worker secrets..."
-$DiscordPublicKey | npx wrangler secret put DISCORD_PUBLIC_KEY
-$discordAllowedUserId | npx wrangler secret put DISCORD_ALLOWED_USER_ID
-$davidToken | npx wrangler secret put INGEST_TOKEN_DAVID
-$nicuToken | npx wrangler secret put INGEST_TOKEN_NICU
-
-Write-Host "Deploying Discord/status Worker..."
-npx wrangler deploy
-
-Write-Host "Connecting David's GitHub monitor..."
-gh secret set STATUS_INGEST_TOKEN -R $repo --body $davidToken
-
-$secureDir = Join-Path $env:LOCALAPPDATA "CodexResetMonitor"
-New-Item -ItemType Directory -Force -Path $secureDir | Out-Null
-$secureNicu = ConvertTo-SecureString $nicuToken -AsPlainText -Force | ConvertFrom-SecureString
-$securePath = Join-Path $secureDir "nicu-ingest-token.dpapi"
-Set-Content -LiteralPath $securePath -Value $secureNicu -Encoding UTF8
-
-Write-Host ""
-Write-Host "Worker deployed."
-Write-Host "Health: $workerUrl/health"
-Write-Host "Discord Interactions Endpoint URL:"
-Write-Host "$workerUrl/discord"
-Write-Host ""
-Write-Host "David STATUS_INGEST_TOKEN was installed in GitHub."
-Write-Host "Nicu's ingest token was stored locally with Windows DPAPI at:"
-Write-Host $securePath
-Write-Host "The raw token was not printed."
-) {
+if ($discordAllowedUserId -notmatch '^\d{17,20}$') {
     throw "Discord User ID must be a numeric Discord snowflake."
 }
 
@@ -70,6 +41,7 @@ npm install
 
 Write-Host "Uploading Worker secrets..."
 $DiscordPublicKey | npx wrangler secret put DISCORD_PUBLIC_KEY
+$discordAllowedUserId | npx wrangler secret put DISCORD_ALLOWED_USER_ID
 $davidToken | npx wrangler secret put INGEST_TOKEN_DAVID
 $nicuToken | npx wrangler secret put INGEST_TOKEN_NICU
 
