@@ -94,7 +94,8 @@ if (-not (Test-Path $nicuTokenPath)) {
 $secureNicuToken = Get-Content -LiteralPath $nicuTokenPath -Raw | ConvertTo-SecureString
 $nicuIngestToken = [System.Net.NetworkCredential]::new("", $secureNicuToken).Password
 
-$discordWebhook = Read-Host "Paste the SAME Discord webhook URL used by David"
+$secureDiscordWebhook = Read-Host "Paste the SAME Discord webhook URL used by David (hidden)" -AsSecureString
+$discordWebhook = [System.Net.NetworkCredential]::new("", $secureDiscordWebhook).Password
 $discordUserId = Read-Host "Paste your numeric Discord User ID"
 if ($discordUserId -notmatch '^\d{17,20}$') {
     throw "Discord User ID is not valid."
