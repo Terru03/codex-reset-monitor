@@ -1,7 +1,22 @@
 const ACCOUNTS = {
-  david: { label: "David", secret: "INGEST_TOKEN_DAVID" },
-  nicu: { label: "Nicu", secret: "INGEST_TOKEN_NICU" },
+  david: {
+    label: "David",
+    secret: "INGEST_TOKEN_DAVID",
+    repo: "codex-reset-monitor",
+  },
+  nicu: {
+    label: "Nicu",
+    secret: "INGEST_TOKEN_NICU",
+    repo: "codex-reset-monitor-nicu",
+  },
 };
+
+const GITHUB_OWNER = "Terru03";
+const GITHUB_WORKFLOW = "monitor.yml";
+const GITHUB_REF = "main";
+const CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const RESET_LOOKAHEAD_MS = 330 * 1000;
+const PENDING_DISPATCH_MS = 7 * 60 * 1000;
 
 const encoder = new TextEncoder();
 
@@ -23,7 +38,149 @@ export default {
 
     return new Response("Not found", { status: 404 });
   },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(runScheduler(env, Number(controller.scheduledTime) || Date.now()));
+  },
 };
+
+async function runScheduler(env, scheduledTimeMs) {
+  const nowMs = Number.isFinite(scheduledTimeMs) ? scheduledTimeMs : Date.now();
+  const outcomes = {};
+
+  for (const [account, config] of Object.entries(ACCOUNTS)) {
+    try {
+      outcomes[account] = await maybeDispatchMonitor(account, config, env, nowMs);
+    } catch (error) {
+      outcomes[account] = {
+        action: "error",
+        error: String(error?.message || error).slice(0, 300),
+      };
+    }
+  }
+
+  await env.CODEX_STATE.put(
+    "scheduler:last",
+    JSON.stringify({
+      at: new Date(nowMs).toISOString(),
+      outcomes,
+    }),
+  );
+}
+
+async function maybeDispatchMonitor(account, config, env, nowMs) {
+  const rawStatus = await env.CODEX_STATE.get(`status:${account}`);
+  let status = null;
+  if (rawStatus) {
+    try {
+      status = JSON.parse(rawStatus);
+    } catch {
+      status = null;
+    }
+  }
+
+  const checkedMs = status ? Date.parse(status.checkedAt) : NaN;
+  const stale =
+    !Number.isFinite(checkedMs) ||
+    nowMs - checkedMs >= CHECK_INTERVAL_MS;
+
+  const resetSoon = hasUpcomingReset(status, nowMs);
+
+  const rawDispatch = await env.CODEX_STATE.get(`dispatch:${account}`);
+  let lastDispatchMs = NaN;
+  if (rawDispatch) {
+    try {
+      const parsed = JSON.parse(rawDispatch);
+      lastDispatchMs = Date.parse(parsed.at);
+    } catch {
+      lastDispatchMs = Date.parse(rawDispatch);
+    }
+  }
+
+  const newerStatusExists =
+    Number.isFinite(checkedMs) &&
+    Number.isFinite(lastDispatchMs) &&
+    checkedMs > lastDispatchMs;
+
+  const dispatchStillPending =
+    Number.isFinite(lastDispatchMs) &&
+    !newerStatusExists &&
+    nowMs - lastDispatchMs < PENDING_DISPATCH_MS;
+
+  if (dispatchStillPending) {
+    return {
+      action: "skip",
+      reason: "dispatch-pending",
+      lastDispatchAt: new Date(lastDispatchMs).toISOString(),
+    };
+  }
+
+  if (!stale && !resetSoon) {
+    return {
+      action: "skip",
+      reason: "fresh",
+      checkedAt: status?.checkedAt || null,
+    };
+  }
+
+  const reason = resetSoon ? "reset-soon" : "stale";
+  await dispatchGithubWorkflow(config.repo, env);
+
+  const dispatchedAt = new Date(nowMs).toISOString();
+  await env.CODEX_STATE.put(
+    `dispatch:${account}`,
+    JSON.stringify({ at: dispatchedAt, reason }),
+  );
+
+  return {
+    action: "dispatch",
+    reason,
+    at: dispatchedAt,
+  };
+}
+
+function hasUpcomingReset(status, nowMs) {
+  if (!status?.windows) return false;
+
+  for (const key of ["300", "10080"]) {
+    const resetAt = Number(status.windows?.[key]?.resetsAt);
+    if (!Number.isFinite(resetAt)) continue;
+
+    const resetMs = resetAt * 1000;
+    if (resetMs > nowMs && resetMs - nowMs <= RESET_LOOKAHEAD_MS) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function dispatchGithubWorkflow(repo, env) {
+  if (!env.GITHUB_DISPATCH_TOKEN) {
+    throw new Error("GITHUB_DISPATCH_TOKEN is missing");
+  }
+
+  const response = await fetch(
+    `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/actions/workflows/${GITHUB_WORKFLOW}/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "codex-reset-monitor-worker/1.0",
+      },
+      body: JSON.stringify({ ref: GITHUB_REF }),
+    },
+  );
+
+  if (response.status !== 204) {
+    const detail = (await response.text()).slice(0, 300);
+    throw new Error(
+      `GitHub dispatch failed for ${repo}: HTTP ${response.status} ${detail}`,
+    );
+  }
+}
 
 async function ingest(request, env) {
   let payload;
