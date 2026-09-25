@@ -301,6 +301,17 @@ function normaliseWindow(window) {
   };
 }
 
+function formatAvailableResets(status) {
+  const available = [];
+  const fiveUsed = Number(status?.windows?.["300"]?.usedPercent);
+  const weeklyUsed = Number(status?.windows?.["10080"]?.usedPercent);
+
+  if (Number.isFinite(fiveUsed) && fiveUsed <= 0) available.push("5-hour");
+  if (Number.isFinite(weeklyUsed) && weeklyUsed <= 0) available.push("weekly");
+
+  return available.length ? available.join(", ") : "None";
+}
+
 function formatUsage(status) {
   const five = status.windows?.["300"];
   const weekly = status.windows?.["10080"];
@@ -310,6 +321,7 @@ function formatUsage(status) {
 
   return (
     `**Codex usage — ${status.label}**\n\n` +
+    `**Resets available:** ${formatAvailableResets(status)}\n\n` +
     `**5-hour:** ${formatRemaining(five?.usedPercent)} remaining\n` +
     `Next reset: **${formatRomania(five?.resetsAt)}**\n\n` +
     `**Weekly:** ${formatRemaining(weekly?.usedPercent)} remaining\n` +
