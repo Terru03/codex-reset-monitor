@@ -7,4 +7,4 @@ binding = "CODEX_STATE"
 id = "49c67ed97f014efe81df1a10a4df797e"
 
 [triggers]
-crons = []
+crons = [ "* * * * *" ]
