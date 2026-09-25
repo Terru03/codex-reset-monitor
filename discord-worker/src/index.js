@@ -16,7 +16,7 @@ const GITHUB_WORKFLOW = "monitor.yml";
 const GITHUB_REF = "main";
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const RESET_LOOKAHEAD_MS = 330 * 1000;
-const PENDING_DISPATCH_MS = 7 * 60 * 1000;
+const PENDING_RUN_GRACE_MS = 7 * 60 * 1000;
 
 const encoder = new TextEncoder();
 
@@ -46,26 +46,16 @@ export default {
 
 async function runScheduler(env, scheduledTimeMs) {
   const nowMs = Number.isFinite(scheduledTimeMs) ? scheduledTimeMs : Date.now();
-  const outcomes = {};
 
   for (const [account, config] of Object.entries(ACCOUNTS)) {
     try {
-      outcomes[account] = await maybeDispatchMonitor(account, config, env, nowMs);
+      await maybeDispatchMonitor(account, config, env, nowMs);
     } catch (error) {
-      outcomes[account] = {
-        action: "error",
-        error: String(error?.message || error).slice(0, 300),
-      };
+      console.error(
+        `Scheduler error for ${account}: ${String(error?.message || error).slice(0, 300)}`,
+      );
     }
   }
-
-  await env.CODEX_STATE.put(
-    "scheduler:last",
-    JSON.stringify({
-      at: new Date(nowMs).toISOString(),
-      outcomes,
-    }),
-  );
 }
 
 async function maybeDispatchMonitor(account, config, env, nowMs) {
@@ -86,57 +76,65 @@ async function maybeDispatchMonitor(account, config, env, nowMs) {
 
   const resetSoon = hasUpcomingReset(status, nowMs);
 
-  const rawDispatch = await env.CODEX_STATE.get(`dispatch:${account}`);
-  let lastDispatchMs = NaN;
-  if (rawDispatch) {
-    try {
-      const parsed = JSON.parse(rawDispatch);
-      lastDispatchMs = Date.parse(parsed.at);
-    } catch {
-      lastDispatchMs = Date.parse(rawDispatch);
+  if (!stale && !resetSoon) {
+    return;
+  }
+
+  const pendingRun = await findPendingOrNewerGithubRun(
+    config.repo,
+    env,
+    checkedMs,
+    nowMs,
+  );
+  if (pendingRun) {
+    return;
+  }
+
+  await dispatchGithubWorkflow(config.repo, env);
+}
+
+async function findPendingOrNewerGithubRun(repo, env, checkedMs, nowMs) {
+  if (!env.GITHUB_DISPATCH_TOKEN) {
+    throw new Error("GITHUB_DISPATCH_TOKEN is missing");
+  }
+
+  const response = await fetch(
+    `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/actions/workflows/${GITHUB_WORKFLOW}/runs?branch=${encodeURIComponent(GITHUB_REF)}&per_page=10`,
+    {
+      headers: githubHeaders(env),
+    },
+  );
+
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    throw new Error(
+      `GitHub run lookup failed for ${repo}: HTTP ${response.status} ${detail}`,
+    );
+  }
+
+  const payload = await response.json();
+  const runs = Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : [];
+
+  for (const run of runs) {
+    const createdMs = Date.parse(run?.created_at || "");
+    const statusName = String(run?.status || "");
+    const active = ["queued", "in_progress", "waiting", "requested", "pending"].includes(statusName);
+
+    if (active) {
+      return run;
+    }
+
+    if (
+      Number.isFinite(createdMs) &&
+      nowMs - createdMs >= 0 &&
+      nowMs - createdMs < PENDING_RUN_GRACE_MS &&
+      (!Number.isFinite(checkedMs) || createdMs > checkedMs)
+    ) {
+      return run;
     }
   }
 
-  const newerStatusExists =
-    Number.isFinite(checkedMs) &&
-    Number.isFinite(lastDispatchMs) &&
-    checkedMs > lastDispatchMs;
-
-  const dispatchStillPending =
-    Number.isFinite(lastDispatchMs) &&
-    !newerStatusExists &&
-    nowMs - lastDispatchMs < PENDING_DISPATCH_MS;
-
-  if (dispatchStillPending) {
-    return {
-      action: "skip",
-      reason: "dispatch-pending",
-      lastDispatchAt: new Date(lastDispatchMs).toISOString(),
-    };
-  }
-
-  if (!stale && !resetSoon) {
-    return {
-      action: "skip",
-      reason: "fresh",
-      checkedAt: status?.checkedAt || null,
-    };
-  }
-
-  const reason = resetSoon ? "reset-soon" : "stale";
-  await dispatchGithubWorkflow(config.repo, env);
-
-  const dispatchedAt = new Date(nowMs).toISOString();
-  await env.CODEX_STATE.put(
-    `dispatch:${account}`,
-    JSON.stringify({ at: dispatchedAt, reason }),
-  );
-
-  return {
-    action: "dispatch",
-    reason,
-    at: dispatchedAt,
-  };
+  return null;
 }
 
 function hasUpcomingReset(status, nowMs) {
@@ -155,6 +153,15 @@ function hasUpcomingReset(status, nowMs) {
   return false;
 }
 
+function githubHeaders(env) {
+  return {
+    Authorization: `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "codex-reset-monitor-worker/1.0",
+  };
+}
+
 async function dispatchGithubWorkflow(repo, env) {
   if (!env.GITHUB_DISPATCH_TOKEN) {
     throw new Error("GITHUB_DISPATCH_TOKEN is missing");
@@ -164,12 +171,7 @@ async function dispatchGithubWorkflow(repo, env) {
     `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/actions/workflows/${GITHUB_WORKFLOW}/dispatches`,
     {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "codex-reset-monitor-worker/1.0",
-      },
+      headers: githubHeaders(env),
       body: JSON.stringify({ ref: GITHUB_REF }),
     },
   );
