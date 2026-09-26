@@ -308,8 +308,17 @@ function formatAvailableResets(status) {
   const fiveUsed = Number(status?.windows?.["300"]?.usedPercent);
   const weeklyUsed = Number(status?.windows?.["10080"]?.usedPercent);
 
-  if (Number.isFinite(fiveUsed) && fiveUsed <= 0) available.push("5-hour");
-  if (Number.isFinite(weeklyUsed) && weeklyUsed <= 0) available.push("weekly");
+  if (
+    Number.isFinite(fiveUsed) &&
+    fiveUsed <= 0 &&
+    Number.isFinite(weeklyUsed) &&
+    weeklyUsed < 100
+  ) {
+    available.push("5-hour");
+  }
+  if (Number.isFinite(weeklyUsed) && weeklyUsed <= 0) {
+    available.push("weekly");
+  }
 
   return available.length ? available.join(", ") : "None";
 }
