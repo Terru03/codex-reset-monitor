@@ -17,6 +17,7 @@ const GITHUB_REF = "main";
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const RESET_LOOKAHEAD_MS = 330 * 1000;
 const PENDING_RUN_GRACE_MS = 7 * 60 * 1000;
+const FAILED_RUN_BACKOFF_MS = 30 * 60 * 1000;
 
 const encoder = new TextEncoder();
 
@@ -118,17 +119,32 @@ async function findPendingOrNewerGithubRun(repo, env, checkedMs, nowMs) {
   for (const run of runs) {
     const createdMs = Date.parse(run?.created_at || "");
     const statusName = String(run?.status || "");
+    const conclusion = String(run?.conclusion || "");
     const active = ["queued", "in_progress", "waiting", "requested", "pending"].includes(statusName);
+    const newerThanStatus =
+      !Number.isFinite(checkedMs) ||
+      (Number.isFinite(createdMs) && createdMs > checkedMs);
+    const ageMs = Number.isFinite(createdMs) ? nowMs - createdMs : NaN;
 
     if (active) {
       return run;
     }
 
     if (
-      Number.isFinite(createdMs) &&
-      nowMs - createdMs >= 0 &&
-      nowMs - createdMs < PENDING_RUN_GRACE_MS &&
-      (!Number.isFinite(checkedMs) || createdMs > checkedMs)
+      conclusion === "failure" &&
+      newerThanStatus &&
+      Number.isFinite(ageMs) &&
+      ageMs >= 0 &&
+      ageMs < FAILED_RUN_BACKOFF_MS
+    ) {
+      return run;
+    }
+
+    if (
+      newerThanStatus &&
+      Number.isFinite(ageMs) &&
+      ageMs >= 0 &&
+      ageMs < PENDING_RUN_GRACE_MS
     ) {
       return run;
     }
